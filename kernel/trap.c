@@ -78,7 +78,31 @@ usertrap(void)
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
+  {
+    if(p->interval==0)
+    {
+      yield();
+      usertrapret();
+    }
+    else
+    {
+      p->count++; 
+      if(p->count==p->interval)
+      {
+        //保存寄存器
+        p->saved_trapframe=(struct trapframe*)kalloc();
+        memmove(p->saved_trapframe,p->trapframe,PGSIZE);
+        
+        //保存被中断指令的地址。sigreturn要返回到此处
+        p->interrupt_ra=p->trapframe->epc;
+
+        p->trapframe->epc=(uint64)p->handler;
+        usertrapret();
+      }    
+    }
     yield();
+  }
+    
 
   usertrapret();
 }
