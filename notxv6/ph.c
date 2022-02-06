@@ -17,6 +17,16 @@ struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
 
+//定义并初始化每个桶的锁
+pthread_mutex_t locks[NBUCKET];
+void initLocks()
+{
+  for (int i ;i<NBUCKET; i++)
+  {
+    pthread_mutex_init(&locks[i],NULL);
+  }
+}
+
 
 double
 now()
@@ -42,6 +52,8 @@ void put(int key, int value)
   int i = key % NBUCKET;
 
   // is the key already present?
+  //加锁保证put操作的原子性
+  pthread_mutex_lock(&locks[i]);
   struct entry *e = 0;
   for (e = table[i]; e != 0; e = e->next) {
     if (e->key == key)
@@ -54,7 +66,7 @@ void put(int key, int value)
     // the new is new.
     insert(key, value, &table[i], table[i]);
   }
-
+  pthread_mutex_unlock(&locks[i]);
 }
 
 static struct entry*
