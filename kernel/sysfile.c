@@ -18,6 +18,8 @@
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
+
+//同时获得fd和其对应文件的指针
 static int
 argfd(int n, int *pfd, struct file **pf)
 {
@@ -37,6 +39,8 @@ argfd(int n, int *pfd, struct file **pf)
 
 // Allocate a file descriptor for the given file.
 // Takes over file reference from caller on success.
+
+//对给定文件分配fd
 static int
 fdalloc(struct file *f)
 {
@@ -60,8 +64,12 @@ sys_dup(void)
 
   if(argfd(0, 0, &f) < 0)
     return -1;
+
+  //对fd对应文件再分配一个新fd并返回
   if((fd=fdalloc(f)) < 0)
     return -1;
+
+  //文件引用数++
   filedup(f);
   return fd;
 }
@@ -75,6 +83,8 @@ sys_read(void)
 
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
+  
+  //从文件f中读n个字节到地址p
   return fileread(f, p, n);
 }
 
@@ -88,6 +98,7 @@ sys_write(void)
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
 
+  //向文件f中写地址p处的n个字节
   return filewrite(f, p, n);
 }
 
@@ -99,7 +110,10 @@ sys_close(void)
 
   if(argfd(0, &fd, &f) < 0)
     return -1;
+
+  //ofile中指针置零
   myproc()->ofile[fd] = 0;
+  //将f引用数--。
   fileclose(f);
   return 0;
 }
@@ -297,14 +311,19 @@ sys_open(void)
 
   begin_op();
 
-  if(omode & O_CREATE){
+  if(omode & O_CREATE)
+  {
+    //要求显式创建文件
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
       return -1;
     }
-  } else {
-    if((ip = namei(path)) == 0){
+  } 
+  else 
+  {//解析路径，返回文件inode
+    if((ip = namei(path)) == 0)
+    {
       end_op();
       return -1;
     }
@@ -320,6 +339,41 @@ sys_open(void)
     iunlockput(ip);
     end_op();
     return -1;
+  }
+
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW))
+  {
+    //这是个符号链接文件并且确定要follow
+    int depth=10;
+    char target[MAXPATH];
+    for(int i = 0; i < depth; i++)
+    {
+      //从文件数据块中读取target
+      if(readi(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH)
+      {
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      //原本的符号链接文件已经不需要了，释放它的锁
+      iunlockput(ip);
+      //得到了target，解析路径得到目标文件的inode
+      if((ip = namei(target)) == 0)
+      {
+        end_op();
+        return -1;
+      }
+      
+      ilock(ip);
+      if(ip->type!=T_SYMLINK)
+        break; 
+      if(i == depth - 1)
+      {
+        iunlockput(ip);
+        end_op();
+        return -1;    
+      }
+    }
   }
 
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -345,9 +399,9 @@ sys_open(void)
     itrunc(ip);
   }
 
+
   iunlock(ip);
   end_op();
-
   return fd;
 }
 
@@ -482,5 +536,43 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+
+//在path处创建一个符号连接，指向文件target。
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0){
+    return -1;
+  }
+
+  begin_op();
+
+  //首先在path处创建了一个符号链接文件，参考open
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0)
+  {
+    end_op();
+    return -1;
+  }
+  
+  //到此为止在path处创建了一个符号链接文件
+  //接下来在文件的数据块中存储target，参考write调用的较底层函数writei
+  //其返回写入的字节数，因此可用返回值判断.target已经是内核中的数组
+  if(writei(ip, 0, (uint64)target, 0, MAXPATH) < MAXPATH)
+  {
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }

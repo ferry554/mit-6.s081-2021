@@ -68,11 +68,14 @@ balloc(uint dev)
   struct buf *bp;
 
   bp = 0;
-  for(b = 0; b < sb.size; b += BPB){
+  for(b = 0; b < sb.size; b += BPB)
+  {
     bp = bread(dev, BBLOCK(b, sb));
-    for(bi = 0; bi < BPB && b + bi < sb.size; bi++){
+    for(bi = 0; bi < BPB && b + bi < sb.size; bi++)
+    {
       m = 1 << (bi % 8);
-      if((bp->data[bi/8] & m) == 0){  // Is block free?
+      if((bp->data[bi/8] & m) == 0)
+      {  // Is block free?
         bp->data[bi/8] |= m;  // Mark block in use.
         log_write(bp);
         brelse(bp);
@@ -176,6 +179,7 @@ struct {
   struct inode inode[NINODE];
 } itable;
 
+//初始化itable的自旋锁和每个内存inode的睡眠锁
 void
 iinit()
 {
@@ -199,7 +203,9 @@ ialloc(uint dev, short type)
   struct buf *bp;
   struct dinode *dip;
 
-  for(inum = 1; inum < sb.ninodes; inum++){
+  for(inum = 1; inum < sb.ninodes; inum++)
+  {
+    //遍历磁盘上的inode，找到一个free的
     bp = bread(dev, IBLOCK(inum, sb));
     dip = (struct dinode*)bp->data + inum%IPB;
     if(dip->type == 0){  // a free inode
@@ -380,23 +386,59 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
-  if(bn < NDIRECT){
+  if(bn < NDIRECT)
+  {//获得直接块的地址，若为0就分配
     if((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
+  if(bn < NINDIRECT)
+  {
     // Load indirect block, allocating if necessary.
+    //获得一级间接块的地址，若为0就分配
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    if((addr = a[bn]) == 0){
+    bp = bread(ip->dev, addr);//根据地址读一级间接块
+    a = (uint*)bp->data;//一级间接块的数据指针
+    if((addr = a[bn]) == 0)
+    {//根据指针从相应偏移量处获得数据块地址，若为0就分配
       a[bn] = addr = balloc(ip->dev);
       log_write(bp);
     }
+    //获得地址后释放一级间接块并返回
+    brelse(bp);
+    return addr;
+  }
+  bn -= NINDIRECT;
+
+  struct buf *bp_2;
+  uint *a_2;
+
+  if(bn < NTWOINDIRECT)
+  {
+    //获得二级间接块的地址，若为0就分配
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    bp_2 = bread(ip->dev, addr);//根据地址读二级间接块
+    a_2 = (uint*)bp_2->data;//二级间接块的数据指针
+    if((addr = a_2[bn/NINDIRECT]) == 0)
+    {
+      //根据指针从相应偏移量处获得一级间接块地址，若为0就分配
+      a_2[bn/NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp_2);
+    }
+    //获得一级间接块地址后释放二级间接块
+    brelse(bp_2);
+    bp = bread(ip->dev, addr);//读一级间接块
+    a = (uint*)bp->data;//一级间接块的数据指针
+    if((addr = a[bn%NINDIRECT]) == 0)
+    {//根据指针从相应偏移量处获得数据块地址，若为0就分配
+      a[bn%NINDIRECT] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+    //获得数据块地址后释放一级间接块并返回
     brelse(bp);
     return addr;
   }
@@ -410,26 +452,58 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp,*bp_2;
+  uint *a,*a_2;
 
-  for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
+  for(i = 0; i < NDIRECT; i++)
+  {
+    if(ip->addrs[i])
+    {//遍历所有直接块地址，若不为0就释放然后设为0
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
 
-  if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
+  if(ip->addrs[NDIRECT])
+  {//一级间接块不为0
+    bp = bread(ip->dev, ip->addrs[NDIRECT]);//读一级间接块
+    a = (uint*)bp->data;//一级间接块的数据指针
+    for(j = 0; j < NINDIRECT; j++)
+    {//释放一级间接块下的所有数据块
       if(a[j])
         bfree(ip->dev, a[j]);
     }
+    //释放一级间接块本身
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  if(ip->addrs[NDIRECT+1])
+  {//二级间接块不为0
+    bp_2 = bread(ip->dev, ip->addrs[NDIRECT+1]);//读二级间接块
+    a_2 = (uint*)bp_2->data;//二级间接块的数据指针
+    for(i = 0; i < NINDIRECT; i++)
+    {//遍历二级间接块下的所有一级间接块
+      if(a_2[i])
+      {//该一级间接块不为空
+        bp = bread(ip->dev, a_2[i]);
+        a = (uint*)bp->data;
+        for(j = 0; j < NINDIRECT; j++)
+        {
+          if(a[j])
+            bfree(ip->dev, a[j]);
+        }
+        //释放一级间接块本身
+        brelse(bp);
+        bfree(ip->dev, a_2[i]);
+        a_2[i] = 0;
+      }
+    }
+    //释放二级间接块本身
+    brelse(bp_2);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
@@ -452,6 +526,8 @@ stati(struct inode *ip, struct stat *st)
 // Caller must hold ip->lock.
 // If user_dst==1, then dst is a user virtual address;
 // otherwise, dst is a kernel address.
+
+//readi(f->ip, 1, addr, f->off, n)
 int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
@@ -463,10 +539,15 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
   if(off + n > ip->size)
     n = ip->size - off;
 
-  for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
+  //一次从inode中读m字节
+  for(tot=0; tot<n; tot+=m, off+=m, dst+=m)
+  {
+    //bmap将逻辑块号（一个inode指向的第几个块）对应到实际物理块号,bread将这个块读出，返回块指针
     bp = bread(ip->dev, bmap(ip, off/BSIZE));
     m = min(n - tot, BSIZE - off%BSIZE);
-    if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) {
+    //将块指针对应处的内容读出m个字节到目标地址处
+    if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) 
+    {
       brelse(bp);
       tot = -1;
       break;
