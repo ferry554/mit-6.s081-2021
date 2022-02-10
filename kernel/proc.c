@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -289,6 +290,15 @@ fork(void)
   }
   np->sz = p->sz;
 
+  for(int i = 0; i < MAXVMA; ++i)
+  {
+    if(p->vma[i].used)
+    {
+      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(p->vma[i]));
+      filedup(p->vma[i].file);
+    }
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -350,6 +360,21 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  for(int i = 0; i < MAXVMA; i++)
+  {
+    if(p->vma[i].used==1)
+    {
+      //来自mmap区域
+      if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE))
+      {
+        filewrite(p->vma[i].file, p->vma[i].addr, p->vma[i].length);        
+      }
+      uvmunmap(p->pagetable, p->vma[i].addr,  p->vma[i].length/PGSIZE, 1);
+      fileclose(p->vma[i].file);
+      p->vma[i].used = 0;
     }
   }
 

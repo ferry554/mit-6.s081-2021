@@ -484,3 +484,131 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;  
+  int length,prot,flags,fd,offset;
+  struct file *f;
+  uint64 error_addr = 0xffffffffffffffff;
+  
+  //首先获取系统调用参数
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 
+    || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0|| argint(5, &offset) < 0)
+    return error_addr;
+
+  //检查权限
+  //写入不可写的共享文件
+  if(!f->writable && (prot & PROT_WRITE) && (flags == MAP_SHARED))
+    return error_addr;
+
+  //读不可读的文件
+  if(!f->readable && (prot & PROT_READ))
+    return error_addr;
+
+
+  //遍历该进程的VMA数组找到一个空闲的VMA
+  struct proc *p = myproc();
+  for(int i = 0; i < MAXVMA; i++)
+  {
+    if(p->vma[i].used==0)
+    {
+      p->vma[i].used=1;
+      //设置相应属性
+      p->vma[i].addr = p->sz;
+      p->vma[i].length = length;
+      p->vma[i].prot = prot;
+      p->vma[i].flags = (flags);
+      p->vma[i].fd = fd;
+      p->vma[i].file = f;
+      p->vma[i].offset = offset;
+      p->sz += length;
+      filedup(f);
+      return p->vma[i].addr;
+    }
+  }
+
+  
+  return error_addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;  
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+  for(int i = 0; i < MAXVMA; i++)
+  {
+    if(p->vma[i].used==1&&addr>=p->vma[i].addr&&addr<p->vma[i].addr+p->vma[i].length)
+    {
+      //来自mmap区域
+      if(addr==p->vma[i].addr)
+      {
+        p->vma[i].addr += length;
+      }
+      p->vma[i].length -= length;
+      if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE))
+      {
+        filewrite(p->vma[i].file, addr, length);        
+      }
+      uvmunmap(p->pagetable, addr, length/PGSIZE, 1);
+      if(p->vma[i].length == 0)
+      {
+        fileclose(p->vma[i].file);
+        p->vma[i].used = 0;
+      }
+      break;
+    }
+  }
+  
+  return 0;
+}
+
+int mmap_handler(uint64 va)
+{
+  struct proc *p = myproc();
+  struct file *f;
+  if(va<=0||va >= p->sz || PGROUNDUP(va) == PGROUNDDOWN(p->trapframe->sp))
+    return -1;
+
+  for(int i = 0; i < MAXVMA; i++)
+  {
+    if(p->vma[i].used==1&&va>=p->vma[i].addr&&va<p->vma[i].addr+p->vma[i].length)
+    {
+        //来自mmap区域
+        uint64 pa = (uint64)kalloc();
+        if(pa == 0)
+        {
+          return -1;
+        }
+        memset((void *)pa, 0, PGSIZE);//不置为0测试会出错
+        f = p->vma[i].file;
+        ilock(f->ip);
+        int offset = PGROUNDDOWN(va - p->vma[i].addr);
+        if(readi(f->ip, 0, pa, offset, PGSIZE) == 0)
+        {
+          iunlock(f->ip);
+          kfree((void *)pa);
+          return -1;
+        }
+        iunlock(f->ip);
+        int flags = PTE_U;
+        if(p->vma[i].prot & PROT_READ) flags |= PTE_R;
+        if(p->vma[i].prot & PROT_WRITE) flags |= PTE_W;
+        if(p->vma[i].prot & PROT_EXEC) flags |= PTE_X;
+        if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, pa, flags)  < 0)
+        {
+          kfree((void *)pa);
+          return -1;
+        }
+        break;
+      }
+    }
+    return 0;
+}
+
